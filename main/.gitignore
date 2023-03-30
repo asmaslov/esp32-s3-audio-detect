@@ -1,0 +1,2 @@
+model-parameters/*.h
+tflite-model/trained_model_compiled.cpp

@@ -30,7 +30,8 @@ const char *tag = "audio-detect";
 #define BLINK_MEDIUM_LOAD_PERIOD_MS  500
 #define BLINK_HEAVY_LOAD_PERIOD_MS   250
 
-#define PREDICT_ON   2
+//TODO: Make option to choose model
+#define PREDICT_ON   0 // 2
 #define PREDICT_OFF  1
 
 #define SAMPLE_MAX  ((1 << 24) - 1)
@@ -132,7 +133,8 @@ extern "C" void app_main(void) {
 
     while (1) {
         // Perform DSP pre-processing and inference
-        ret = run_classifier_continuous(&signal, &result, false);
+        ret = run_classifier(&signal, &result, false);
+        // ret = run_classifier_continuous(&signal, &result, false);
 
         // Print return code and how long it took to perform inference
         if (ret != EI_IMPULSE_OK) {
