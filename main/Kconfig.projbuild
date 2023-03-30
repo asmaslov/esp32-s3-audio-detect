@@ -1,0 +1,40 @@
+menu "Project Configuration"
+
+    choice I2S_NUM
+        prompt "I2S number"
+        default I2S_NUM_0
+        help
+            Defines the I2S port for microphone data input.
+
+        config I2S_NUM_0
+            bool "I2S 0"
+        config I2S_NUM_1
+            bool "I2S 1"
+    endchoice
+
+    config I2S_DATA_GPIO
+        int "I2S Data GPIO number"
+        default 2
+        help
+            Set the GPIO number used for transmitting/receiving data from I2S.
+
+    config I2S_WS_GPIO
+        int "I2S Word select GPIO"
+        default 42
+        help
+            Set the GPIO number used for the word select line from I2S.
+
+    config I2S_CLK_GPIO
+        int "I2S Clock GPIO"
+        default 41
+        help
+            Set the GPIO number used for the clock line from I2S.
+
+    config LED_GPIO
+        int "Led GPIO number"
+        range 0 48
+        default 3
+        help
+            GPIO number to turn LED on and off by predicted command.
+
+endmenu
