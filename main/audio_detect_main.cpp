@@ -1,42 +1,60 @@
-/* I2S Digital Microphone Recording Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
+#include "esp_vfs_fat.h"
 #include "esp_log.h"
 #include "driver/i2s.h"
 #include "driver/gpio.h"
+#include "driver/sdmmc_host.h"
+#include "sdmmc_cmd.h"
 #include "sdkconfig.h"
 #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
 
 const char *tag = "audio-detect";
+
+#define MODEL_FAUCET_NOISE_DETECTION  0
+#define MODEL_KEYWORD_SPOTTING        1
+
+//TODO: Make option to choose model
+#define MODEL MODEL_KEYWORD_SPOTTING
+
+#if (MODEL == MODEL_FAUCET_NOISE_DETECTION)
+    #define PREDICT_ON   0
+    #define PREDICT_OFF  1
+#elif (MODEL == MODEL_KEYWORD_SPOTTING)
+    #define PREDICT_ON   2
+    #define PREDICT_OFF  1
+#endif
 
 #if defined(CONFIG_I2S_NUM_0)
 #define I2S_NUM  I2S_NUM_0
 #elif defined(CONFIG_I2S_NUM_1)
 #define I2S_NUM  I2S_NUM_1
 #endif
-
-#define LED_OFF_PERIOD_MS          3000
-#define BLINK_LIGHT_LOAD_PERIOD_MS   1000
-#define BLINK_MEDIUM_LOAD_PERIOD_MS  500
-#define BLINK_HEAVY_LOAD_PERIOD_MS   250
-
-//TODO: Make option to choose model
-#define PREDICT_ON   0 // 2
-#define PREDICT_OFF  1
-
 #define SAMPLE_MAX  ((1 << 24) - 1)
-
 int32_t i2s_buff[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+#define SD_MOUNT_POINT    "/sdcard"
+#define WAVE_HEADER_SIZE  44
+#define WAV_SAMPLE_BITS   I2S_BITS_PER_SAMPLE_24BIT
+#define WAV_SAMPLE_SIZE   (WAV_SAMPLE_BITS / 8)
+#define WAVE_BYTE_RATE    (EI_CLASSIFIER_FREQUENCY * WAV_SAMPLE_SIZE)
+sdmmc_card_t* card;
+FILE* wav_file;
+uint8_t wav_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * WAV_SAMPLE_SIZE];
+int wav_recorded_bytes;
+//TODO: Make controllable playback
+#define REC_TIME  10
+SemaphoreHandle_t semaphore_start, semaphore_stop;
+
+
+#define TASK_READ_BUTTONS_STACK_SIZE        2048
+#define TASK_READ_BUTTONS_PRIORITY          (configMAX_PRIORITIES - 2)
+#define TASK_DETECT_STACK_SIZE              4096
+#define TASK_DETECT_PRIORITY                (configMAX_PRIORITIES - 1)
 
 /* I2S */
 
@@ -98,11 +116,84 @@ esp_err_t led_turn(bool on) {
     return ret;
 }
 
+/* SDCARD */
+
+void mount_sdcard(void)
+{
+    esp_err_t ret;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = true,
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
+    ESP_LOGI(tag, "Initializing SD card");
+
+    ESP_LOGI(tag, "Using SDMMC peripheral");
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 1;
+    slot_config.clk = (gpio_num_t)CONFIG_SDIO_CLK_GPIO;
+    slot_config.cmd = (gpio_num_t)CONFIG_SDIO_CMD_GPIO;
+    slot_config.d0 = (gpio_num_t)CONFIG_SDIO_D0_GPIO;
+    //slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    ESP_LOGI(tag, "Mounting filesystem");
+    ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(tag, "Failed to mount filesystem. "
+                     "If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+        } else {
+            ESP_LOGE(tag, "Failed to initialize the card (%s). "
+                     "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+        }
+        while(1);
+    }
+    ESP_LOGI(tag, "Filesystem mounted");
+
+    sdmmc_card_print_info(stdout, card);
+}
+
+void umount_sdcard(void) {
+    esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);
+    ESP_LOGI(tag, "Card unmounted");
+}
+
+void generate_wav_header(char* wav_header, uint32_t wav_size, uint32_t sample_rate){
+
+    // See this for reference: http://soundfile.sapp.org/doc/WaveFormat/
+    uint32_t file_size = wav_size + WAVE_HEADER_SIZE - 8;
+    uint32_t byte_rate = WAVE_BYTE_RATE;
+
+    const char set_wav_header[] = {
+        'R','I','F','F', // ChunkID
+        (uint8_t)file_size, (uint8_t)(file_size >> 8), (uint8_t)(file_size >> 16), (uint8_t)(file_size >> 24), // ChunkSize
+        'W','A','V','E', // Format
+        'f','m','t',' ', // Subchunk1ID
+        0x10, 0x00, 0x00, 0x00, // Subchunk1Size (16 for PCM)
+        0x01, 0x00, // AudioFormat (1 for PCM)
+        0x01, 0x00, // NumChannels (1 channel)
+        (uint8_t)sample_rate, (uint8_t)(sample_rate >> 8), (uint8_t)(sample_rate >> 16), (uint8_t)(sample_rate >> 24), // SampleRate
+        (uint8_t)byte_rate, (uint8_t)(byte_rate >> 8), (uint8_t)(byte_rate >> 16), (uint8_t)(byte_rate >> 24), // ByteRate
+        0x02, 0x00, // BlockAlign
+        WAV_SAMPLE_BITS, 0x00, // BitsPerSample
+        'd','a','t','a', // Subchunk2ID
+        (uint8_t)wav_size, (uint8_t)(wav_size >> 8), (uint8_t)(wav_size >> 16), (uint8_t)(wav_size >> 24), // Subchunk2Size
+    };
+
+    memcpy(wav_header, set_wav_header, sizeof(set_wav_header));
+}
+
 /* MAIN */
 
 static int get_signal_data(size_t offset, size_t length, float *out_ptr) {
     esp_err_t ret;
     size_t bytes_read;
+
+    ESP_LOGD(tag, "Request data offset=%u length=%u", offset, length);
 
     ret = i2s_read(I2S_NUM, i2s_buff, length * sizeof(int32_t), &bytes_read, portMAX_DELAY);
     ESP_ERROR_CHECK(ret);
@@ -110,20 +201,44 @@ static int get_signal_data(size_t offset, size_t length, float *out_ptr) {
 
     for (size_t i = 0; i < length; i++) {
         out_ptr[i] = (float)(i2s_buff[i] >> 8) / SAMPLE_MAX;
+        //FIXME: Part of the samples is lost somehow, make queue for samples and a separated task to write wav file
+        wav_buffer[i * WAV_SAMPLE_SIZE + 0] = (uint8_t)(i2s_buff[i] >> 8);
+        wav_buffer[i * WAV_SAMPLE_SIZE + 1] = (uint8_t)(i2s_buff[i] >> 16);
+        wav_buffer[i * WAV_SAMPLE_SIZE + 2] = (uint8_t)(i2s_buff[i] >> 24);
+    }
+
+    fwrite(wav_buffer, 1, length * WAV_SAMPLE_SIZE, wav_file);
+    wav_recorded_bytes += length * WAV_SAMPLE_SIZE;
+    if (wav_recorded_bytes >= WAVE_BYTE_RATE * REC_TIME) {
+        xSemaphoreGive(semaphore_stop);
     }
 
     return EIDSP_OK;
 }
 
-extern "C" void app_main(void) {
+void task_read_butons(void *arg) {
+    const char *tag = pcTaskGetName(xTaskGetCurrentTaskHandle());
+
+    ESP_LOGI(tag, "Wait 3 seconds to run ...");
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    ESP_LOGI(tag, "2 ...");
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    ESP_LOGI(tag, "1 ...");
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    xSemaphoreGive(semaphore_start);
+
+    while (1) {
+        //TODO: Get pressed button
+        //TODO: xSemaphoreGive(semaphore_start);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+
+void task_detect(void *arg) {
     signal_t signal;
     ei_impulse_result_t result;
     EI_IMPULSE_ERROR ret;
-
-    ESP_ERROR_CHECK(init_microphone());
-    ESP_ERROR_CHECK(led_init());
-
-    ESP_LOGI(tag, "Program start");
+    const char *tag = pcTaskGetName(xTaskGetCurrentTaskHandle());
 
     // Assign callback function to fill buffer used for preprocessing/inference
     signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
@@ -132,32 +247,99 @@ extern "C" void app_main(void) {
     run_classifier_init();
 
     while (1) {
-        // Perform DSP pre-processing and inference
-        ret = run_classifier(&signal, &result, false);
-        // ret = run_classifier_continuous(&signal, &result, false);
+        ESP_LOGI(tag, "Insert MicroSD card and press 'Play' button");
+        xSemaphoreTake(semaphore_start, portMAX_DELAY);
+        ESP_LOGI(tag, "Audio detection started. Press 'Menu' to stop");
 
-        // Print return code and how long it took to perform inference
-        if (ret != EI_IMPULSE_OK) {
-            ESP_LOGE(tag,  "Classifier returned %d", ret);
+        mount_sdcard();
+
+        char wav_header_fmt[WAVE_HEADER_SIZE];
+        generate_wav_header(wav_header_fmt, WAVE_BYTE_RATE * REC_TIME, EI_CLASSIFIER_FREQUENCY);
+
+        // Use POSIX and C standard library functions to work with files.
+        ESP_LOGI(tag, "Opening file");
+
+        // First check if file exists before creating a new file.
+        struct stat st;
+        ESP_LOGI(tag, "Check if file exists");
+        if (stat(SD_MOUNT_POINT"/record.wav", &st) == 0) {
+            // Delete it if it exists
+            ESP_LOGI(tag, "Delete file");
+            unlink(SD_MOUNT_POINT"/record.wav");
         }
-        ESP_LOGD(tag, "Timing: DSP %d ms, inference %d ms", 
-                 result.timing.dsp, result.timing.classification);
 
-        size_t max_idx;
-        float max = 0;
-        printf("Predictions:\r\n");
-        for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-            printf("  %s: ", ei_classifier_inferencing_categories[i]);
-            printf("%.5f\r\n", result.classification[i].value);
-            if (result.classification[i].value > max) {
-                max = result.classification[i].value;
-                max_idx = i;
+        // Create new WAV file
+        ESP_LOGI(tag, "Create new file");
+        wav_file = fopen(SD_MOUNT_POINT"/record.wav", "w");
+        if (wav_file == NULL) {
+            ESP_LOGE(tag, "Failed to open file for writing");
+            while(1);
+        }
+
+        // Write the header to the WAV file
+        ESP_LOGI(tag, "Write header");
+        fwrite(wav_header_fmt, 1, WAVE_HEADER_SIZE, wav_file);
+
+        ESP_LOGI(tag, "Run classifier");
+        while (xSemaphoreTake(semaphore_stop, 0) == pdFALSE) {
+            // Perform DSP pre-processing and inference
+#if (MODEL == MODEL_FAUCET_NOISE_DETECTION)
+            ret = run_classifier(&signal, &result, false);
+#elif (MODEL == MODEL_KEYWORD_SPOTTING)
+            ret = run_classifier_continuous(&signal, &result, false);
+#endif
+
+            // Print return code and how long it took to perform inference
+            if (ret != EI_IMPULSE_OK) {
+                ESP_LOGE(tag, "Classifier returned %d", ret);
+            }
+            ESP_LOGD(tag, "Timing: DSP %d ms, inference %d ms", 
+                    result.timing.dsp, result.timing.classification);
+
+            size_t max_idx;
+            float max = 0;
+            printf("Predictions:\r\n");
+            for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+                printf("  %s: ", ei_classifier_inferencing_categories[i]);
+                printf("%.5f\r\n", result.classification[i].value);
+                if (result.classification[i].value > max) {
+                    max = result.classification[i].value;
+                    max_idx = i;
+                }
+            }
+            if (PREDICT_ON == max_idx) {
+                led_turn(true);
+            } else if (PREDICT_OFF == max_idx) {
+                led_turn(false);
             }
         }
-        if (PREDICT_ON == max_idx) {
-            led_turn(true);
-        } else if (PREDICT_OFF == max_idx) {
-            led_turn(false);
-        }
+
+        ESP_LOGI(tag, "Recording done!");
+        fclose(wav_file);
+        ESP_LOGI(tag, "File written on SDCard");
+
+        umount_sdcard();
+    }
+}
+
+extern "C" void app_main(void) {
+    TaskHandle_t handle_read_butons, handle_detect;
+
+    semaphore_start = xSemaphoreCreateBinary();
+    semaphore_stop = xSemaphoreCreateBinary();
+    xTaskCreate(task_read_butons, "task_read_butons", TASK_READ_BUTTONS_STACK_SIZE, NULL, TASK_READ_BUTTONS_PRIORITY, &handle_read_butons);
+
+    ESP_ERROR_CHECK(init_microphone());
+    ESP_ERROR_CHECK(led_init());
+
+    xTaskCreate(task_detect, "task_detect", TASK_DETECT_STACK_SIZE, NULL, TASK_DETECT_PRIORITY, &handle_detect);
+
+    ESP_LOGI(tag, "Program start");
+
+    while (1) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        ESP_LOGD(tag, "Task %s stack watermark = %u", pcTaskGetName(handle_read_butons), uxTaskGetStackHighWaterMark(handle_read_butons));
+        ESP_LOGD(tag, "Task %s stack watermark = %u", pcTaskGetName(handle_detect), uxTaskGetStackHighWaterMark(handle_detect));
+        ESP_LOGD(tag, "Task %s stack watermark = %u", pcTaskGetName(xTaskGetCurrentTaskHandle()), uxTaskGetStackHighWaterMark(NULL));
     }
 }

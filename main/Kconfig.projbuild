@@ -19,13 +19,13 @@ menu "Project Configuration"
             Set the GPIO number used for transmitting/receiving data from I2S.
 
     config I2S_WS_GPIO
-        int "I2S Word select GPIO"
+        int "I2S Word select GPIO number"
         default 42
         help
             Set the GPIO number used for the word select line from I2S.
 
     config I2S_CLK_GPIO
-        int "I2S Clock GPIO"
+        int "I2S Clock GPIO number"
         default 41
         help
             Set the GPIO number used for the clock line from I2S.
@@ -36,5 +36,23 @@ menu "Project Configuration"
         default 3
         help
             GPIO number to turn LED on and off by predicted command.
+
+    config SDIO_CMD_GPIO
+        int "SD card CMD GPIO number"
+        default 38
+        help
+            Set the GPIO number used for CMD from SDIO.
+
+    config SDIO_CLK_GPIO
+        int "SD card CLK GPIO number"
+        default 39
+        help
+            Set the GPIO number used for CLK from SDIO.
+
+    config SDIO_D0_GPIO
+        int "SD card D0 GPIO number"
+        default 40
+        help
+            Set the GPIO number used for D0 from SDIO.
 
 endmenu
