@@ -38,12 +38,12 @@ ei_dsp_config_mfcc_t ei_dsp_config_3 = {
     4, // int implementationVersion
     1, // int length of axes
     13, // int num_cepstral
-    0.02f, // float frame_length
+    0.025f, // float frame_length
     0.02f, // float frame_stride
-    16, // int num_filters
-    256, // int fft_length
-    101, // int win_size
-    300, // int low_frequency
+    32, // int num_filters
+    512, // int fft_length
+    151, // int win_size
+    80, // int low_frequency
     0, // int high_frequency
     0.98f, // float pre_cof
     1 // int pre_shift
@@ -52,7 +52,7 @@ ei_dsp_config_mfcc_t ei_dsp_config_3 = {
 const size_t ei_dsp_blocks_size = 1;
 ei_model_dsp_t ei_dsp_blocks[ei_dsp_blocks_size] = {
     { // DSP block 3
-        650,
+        637,
         &extract_mfcc_features,
         (void*)&ei_dsp_config_3,
         ei_dsp_config_3_axes,
@@ -91,20 +91,20 @@ const ei_learning_block_t ei_learning_blocks[ei_learning_blocks_size] = {
 const ei_model_performance_calibration_t ei_calibration = {
     1, /* integer version number */
     true, /* has configured performance calibration */
-    348, /* average duration window ms */
-    0.8846274100569467, /* detection threshold */
-    1223,  /* suppression ms */
+    290, /* average duration window ms */
+    0.6659328748560879, /* detection threshold */
+    1367,  /* suppression ms */
     0x6, /* suppression flags */
 };
 
 
-const ei_impulse_t impulse_201938_2 = {
+const ei_impulse_t impulse_201938_7 = {
     .project_id = 201938,
     .project_owner = "Anton Maslov",
     .project_name = "keyword-spotting",
-    .deploy_version = 2,
+    .deploy_version = 7,
 
-    .nn_input_frame_size = 650,
+    .nn_input_frame_size = 637,
     .raw_sample_count = 16000,
     .raw_samples_per_frame = 1,
     .dsp_input_frame_size = 16000 * 1,
@@ -143,6 +143,6 @@ const ei_impulse_t impulse_201938_2 = {
     .categories = ei_classifier_inferencing_categories
 };
 
-const ei_impulse_t ei_default_impulse = impulse_201938_2;
+const ei_impulse_t ei_default_impulse = impulse_201938_7;
 
 #endif // _EI_CLASSIFIER_MODEL_METADATA_H_
