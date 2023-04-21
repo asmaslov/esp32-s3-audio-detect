@@ -190,6 +190,8 @@ void generate_wav_header(char* wav_header, uint32_t wav_size, uint32_t sample_ra
     memcpy(wav_header, set_wav_header, sizeof(set_wav_header));
 }
 
+//TODO: Add Bluetooth control option
+
 /* MAIN */
 
 static int get_signal_data(size_t offset, size_t length, float *out_ptr) {
